@@ -112,6 +112,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         Worker.__init__(self)
 
         self.config = config
+        self.val_only = getattr(self.config, "trainer", {}).get("val_only", getattr(self.config, "val_only", False))
+        if self.val_only:
+            logger.info("Evaluation only mode: no training will be performed.")
         self.profile_option = kwargs.get("profile_option", None)
         import torch.distributed
 
@@ -269,6 +272,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
         if self.rank == 0:
             print(f"Model config after override: {actor_model_config}")
+
+        if self.val_only:
+            # Create a minimal empty FSDP module for val_only mode
+            # This prevents None module issues in sharding managers
+            class EmptyModule(torch.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    # Add minimal parameter to make FSDP work
+                    self.dummy_param = torch.nn.Parameter(torch.zeros(1))
+                
+                def forward(self, *args, **kwargs):
+                    return None
+                    
+                def state_dict(self, *args, **kwargs):
+                    return {}
+            
+            empty_module = EmptyModule()
+            empty_actor_module_fsdp = FSDP(empty_module, device_id=get_device_id())
+
+            log_gpu_memory_usage(f"After init {role} from HF AutoModel, use empty module for val_only mode", logger=logger)
+            return empty_actor_module_fsdp, None, None, actor_model_config
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
         init_context = get_init_weight_context_manager(
@@ -602,16 +626,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             # get the original unwrapped module
-            if fsdp_version(self.actor_module_fsdp) == 1:
-                self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
+            if not self.val_only:
+                if fsdp_version(self.actor_module_fsdp) == 1:
+                    self.actor_module = self.actor_module_fsdp._fsdp_wrapped_module
 
-            if self._is_offload_param:
-                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-                log_gpu_memory_usage("After offload actor model during init", logger=logger)
+                if self._is_offload_param:
+                    offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+                    log_gpu_memory_usage("After offload actor model during init", logger=logger)
 
-            if self._is_offload_optimizer:
-                offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-                log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
+                if self._is_offload_optimizer:
+                    offload_fsdp_optimizer(optimizer=self.actor_optimizer)
+                    log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
 
         if self._is_actor:
             OmegaConf.set_struct(self.config.actor, True)
@@ -656,7 +681,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 checkpoint_config=self.config.actor.checkpoint,
             )
 
-        if not self._is_actor and self._is_rollout:
+        if not self._is_actor and self._is_rollout and not self.val_only:
             # If ActorRolloutRefWorker is initialized as a standalone rollout,
             # create a checkpoint manager for FSDP model to allow loading FSDP checkpoints for rollout.
 
