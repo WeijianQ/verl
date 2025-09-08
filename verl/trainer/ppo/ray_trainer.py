@@ -553,6 +553,22 @@ class RayPPOTrainer:
                 "validation gen temperature should be greater than 0 when enabling do_sample"
             )
 
+        # Determine val_only from training steps and val_before_train
+        inferred_validation_only_mode = config.trainer.total_training_steps == 0 and config.trainer.val_before_train
+        configured_val_only = config.trainer.val_only
+        
+        # Check for mismatch and log override
+        if inferred_validation_only_mode != configured_val_only:
+            print(f"WARNING: Config validation: val_only mismatch detected. "
+                  f"Computed: {inferred_validation_only_mode} (based on total_training_steps={self.config.trainer.total_training_steps}, "
+                  f"val_before_train={self.config.trainer.val_before_train}), "
+                  f"Configured: trainer.val_only={configured_val_only}")
+        
+        self.val_only = configured_val_only
+        self.config.actor_rollout_ref.val_only = self.val_only
+        if self.val_only:
+            print("Evaluation only mode: no training will be performed.")
+
         print("[validate_config] All configuration checks passed successfully!")
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
@@ -1350,6 +1366,7 @@ class RayPPOTrainer:
                         self.val_reward_fn is not None
                         and self.config.trainer.test_freq > 0
                         and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                        and not self.val_only # skip validation if val_only is True
                     ):
                         with marked_timer("testing", timing_raw, color="green"):
                             val_metrics: dict = self._validate()
