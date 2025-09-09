@@ -60,9 +60,9 @@ from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seql
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.async_server import AsyncLLMServerManager
-from gigpo import core_gigpo
+import src.verlagent.core_gigpo as core_gigpo
 
-from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
+from src.verlagent.multi_turn_rollout import TrajectoryCollector, adjust_batch
 
 WorkerType = Type[Worker]
 
@@ -568,6 +568,23 @@ class RayPPOTrainer:
         if config.actor_rollout_ref.rollout.multi_turn.enable:
             assert config.actor_rollout_ref.rollout.multi_turn.tool_config_path is not None, "tool_config_path must be set when enabling multi_turn with tool, due to no role-playing support"
             assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO], "only GRPO is tested for multi-turn with tool"
+
+        # Determine val_only from training steps and val_before_train
+        inferred_validation_only_mode = config.trainer.total_training_steps == 0 and config.trainer.val_before_train
+        configured_val_only = config.trainer.val_only
+        
+        # Check for mismatch and log override
+        if inferred_validation_only_mode != configured_val_only:
+            print(f"WARNING: Config validation: val_only mismatch detected. "
+                  f"Computed: {inferred_validation_only_mode} (based on total_training_steps={self.config.trainer.total_training_steps}, "
+                  f"val_before_train={self.config.trainer.val_before_train}), "
+                  f"Configured: trainer.val_only={configured_val_only}")
+        
+        self.val_only = configured_val_only
+        self.config.actor_rollout_ref.val_only = self.val_only
+        self.config.actor_rollout_ref.rollout.load_format = "auto"
+        if self.val_only:
+            print("Evaluation only mode: no training will be performed.")
 
         print("[validate_config] All configuration checks passed successfully!")
 
@@ -1237,7 +1254,7 @@ class RayPPOTrainer:
                             )
 
                     # validate
-                    if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
+                    if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0) and not self.val_only:
                         with _timer("testing", timing_raw):
                             val_metrics: dict = self._validate()
                             if is_last_step:
