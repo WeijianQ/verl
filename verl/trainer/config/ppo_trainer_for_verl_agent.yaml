@@ -1,3 +1,8 @@
+defaults:
+  - actor@actor_rollout_ref.actor: dp_actor
+  - ref@actor_rollout_ref.ref: dp_ref
+  - rollout@actor_rollout_ref.rollout: rollout
+
 data:
   tokenizer: null
   use_shm: False
@@ -146,6 +151,7 @@ actor_rollout_ref:
       max_turns: null  # null for no limit (default max_length // 3)
       tool_config_path: null  # null for no tool
       format: chatml  # chatml, more formats will be supported in the future
+  val_only: False
 
 critic:
   rollout_n: ${actor_rollout_ref.rollout.n}
@@ -278,6 +284,7 @@ trainer:
   # The timeout for ray worker group to wait for the register center to be ready
   ray_wait_register_center_timeout: 300
   device: cuda
+  val_only: False
 
 ray_init:
   num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.

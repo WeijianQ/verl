@@ -20,7 +20,7 @@ import os
 import hydra
 import ray
 
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+from verl.trainer.ppo.ray_trainer_for_verl_agent import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 
 
@@ -95,7 +95,7 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
-        from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
+        from verl.trainer.ppo.ray_trainer_for_verl_agent import ResourcePoolManager, Role
 
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(actor_rollout_cls),
