@@ -29,16 +29,29 @@ def main(config):
     run_ppo(config)
 
 
+# Define a function to run the PPO-like training process
 def run_ppo(config) -> None:
+    # Check if Ray is not initialized
     if not ray.is_initialized():
-        # this is for local ray cluster
+        # Initialize Ray with a local cluster configuration
+        # Set environment variables in the runtime environment to control tokenizer parallelism,
+        # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
+        # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true"}},
+            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true", "VLLM_USE_V1": os.getenv("VLLM_USE_V1", "1")}},
             num_cpus=config.ray_init.num_cpus,
         )
 
+    # Create a remote instance of the TaskRunner class, and
+    # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
     runner = TaskRunner.remote()
     ray.get(runner.run.remote(config))
+
+    # [Optional] get the path of the timeline trace file from the configuration, default to None
+    # This file is used for performance analysis
+    timeline_json_file = config.ray_init.get("timeline_json_file", None)
+    if timeline_json_file:
+        ray.timeline(filename=timeline_json_file)
 
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
