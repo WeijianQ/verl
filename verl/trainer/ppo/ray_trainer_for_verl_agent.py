@@ -711,7 +711,10 @@ class RayPPOTrainer:
         sample_outputs = []
         sample_scores = []
 
-        for test_data in self.val_dataloader:
+        # save
+
+        # Show a concise progress bar during validation
+        for test_data in tqdm(self.val_dataloader, total=len(self.val_dataloader), desc="Validation", leave=False):
             test_batch = DataProto.from_single_dict(test_data)
 
             # repeat test batch
@@ -747,7 +750,7 @@ class RayPPOTrainer:
                 "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
                 "validate": True,
             }
-            print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
+            # print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # # pad to be divisible by dp_size
             # test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
@@ -758,12 +761,13 @@ class RayPPOTrainer:
 
             ################ agent-environment loop ###############
             test_output_gen_batch = self.traj_collector.multi_turn_loop(
-                                                    gen_batch=test_gen_batch,
-                                                    actor_rollout_wg=self.actor_rollout_wg,
-                                                    envs=self.val_envs,
-                                                    is_train=False,
-                                                    )
-            print('validation generation end')
+                gen_batch=test_gen_batch,
+                actor_rollout_wg=self.actor_rollout_wg,
+                envs=self.val_envs,
+                is_train=False,
+                async_rollout_manager=(self.async_rollout_manager if getattr(self, "async_rollout_mode", False) else None),
+            )
+            # print('validation generation end')
             del test_batch
             test_batch = test_output_gen_batch
             # Store generated outputs
@@ -894,7 +898,7 @@ class RayPPOTrainer:
         if self.config.actor_rollout_ref.rollout.mode == "async":
             self.async_rollout_mode = True
             self.async_rollout_manager = AsyncLLMServerManager(
-                config=self.config.actor_rollout_ref,
+                config=self.config,
                 worker_group=self.actor_rollout_wg,
             )
 
@@ -1068,11 +1072,12 @@ class RayPPOTrainer:
 
                         ################ agent-environment loop ###############
                         gen_batch_output = self.traj_collector.multi_turn_loop(
-                                                                gen_batch=gen_batch,
-                                                                actor_rollout_wg=self.actor_rollout_wg,
-                                                                envs=self.envs,
-                                                                is_train=True,
-                                                                )
+                            gen_batch=gen_batch,
+                            actor_rollout_wg=self.actor_rollout_wg,
+                            envs=self.envs,
+                            is_train=True,
+                            async_rollout_manager=(self.async_rollout_manager if getattr(self, "async_rollout_mode", False) else None),
+                        )
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer("gen_max", timing_raw):
                             gen_baseline_batch = deepcopy(gen_batch)
