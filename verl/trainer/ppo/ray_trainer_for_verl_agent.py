@@ -711,6 +711,10 @@ class RayPPOTrainer:
         sample_outputs = []
         sample_scores = []
 
+        # Collect full trajectories and metadata when running in val_only mode
+        val_only_dump_records = []
+        game_success_agg = []
+
         # save
 
         # Show a concise progress bar during validation
@@ -775,6 +779,22 @@ class RayPPOTrainer:
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
 
+            # When validating only, gather decoded prompt/response with uid for dumping
+            if self.val_only:
+                prompt_ids = test_output_gen_batch.batch["prompts"]
+                prompt_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in prompt_ids]
+                uids = test_output_gen_batch.non_tensor_batch.get("uid", [str(uuid.uuid4()) for _ in range(len(prompt_texts))])
+                for p, r, u in zip(prompt_texts, output_texts, uids):
+                    val_only_dump_records.append({
+                        "uid": str(u),
+                        "prompt": p,
+                        "response": r,
+                    })
+
+                # extend game_name_success_info if provided by rollout
+                if isinstance(test_output_gen_batch.meta_info, dict) and "game_name_success_info" in test_output_gen_batch.meta_info:
+                    game_success_agg.extend(test_output_gen_batch.meta_info["game_name_success_info"])
+
             # test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
@@ -797,6 +817,19 @@ class RayPPOTrainer:
                         assert test_batch.non_tensor_batch[k][0] == test_batch.non_tensor_batch[k][i], f'not all success_rate are the same, 0: {test_batch.non_tensor_batch[k][0]}, {i}: {test_batch.non_tensor_batch[k][i]}'
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+
+        # If val_only, dump collected trajectories and metadata to JSON
+        if self.val_only:
+            val_dump_dir = self.config.trainer.get("project_name", "outputs")
+            os.makedirs(val_dump_dir, exist_ok=True)
+            out_path = os.path.join(val_dump_dir, f"val_only_results.json")
+            payload = {
+                "trajectories": val_only_dump_records,
+                "game_name_success_info": game_success_agg,
+            }
+            with open(out_path, "w") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            print(f"Saved val-only trajectories to {out_path}")
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
         data_sources = np.concatenate(data_source_lst, axis=0)
