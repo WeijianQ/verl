@@ -292,6 +292,7 @@ ray_init:
 
 env:
   env_name: alfworld/AlfredTWEnv
+  eval_split_alfworld: eval_out_of_distribution
   seed: 0
   max_steps: 50
   history_length: 2
