@@ -653,8 +653,9 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path):
+    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict):
         """Dump rollout/validation samples as JSONL."""
+        dump_path = self.config.trainer.rollout_data_dir
         os.makedirs(dump_path, exist_ok=True)
         filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
 
@@ -820,9 +821,14 @@ class RayPPOTrainer:
 
         # If val_only, dump collected trajectories and metadata to JSON
         if self.val_only:
-            val_dump_dir = self.config.trainer.get("project_name", "outputs")
+            val_dump_dir = self.config.trainer.rollout_data_dir
             os.makedirs(val_dump_dir, exist_ok=True)
             out_path = os.path.join(val_dump_dir, f"val_only_results.json")
+            if os.path.exists(out_path):
+                import datetime
+                suffix = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                print(f"Warning: {out_path} already exists, add {suffix} to the filename")
+                out_path = os.path.join(val_dump_dir, f"val_only_results_{suffix}.json")
             payload = {
                 "trajectories": val_only_dump_records,
                 "game_name_success_info": game_success_agg,
