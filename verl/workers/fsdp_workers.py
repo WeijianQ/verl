@@ -270,8 +270,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         }
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
-        if self.rank == 0:
-            print(f"Model config after override: {actor_model_config}")
+        
 
         if self.val_only:
             # Create a minimal empty FSDP module for val_only mode
@@ -287,7 +286,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     
                 def state_dict(self, *args, **kwargs):
                     return {}
-            
+            if self.rank == 0:
+                print(f"Val only mode, use empty module")
             empty_module = EmptyModule()
             empty_actor_module_fsdp = FSDP(empty_module, device_id=get_device_id())
 
@@ -295,6 +295,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             return empty_actor_module_fsdp, None, None, actor_model_config
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
+        if self.rank == 0:
+            print(f"Model config after override: {actor_model_config}")
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
         )
@@ -595,7 +597,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         use_remove_padding = self.config.model.get("use_remove_padding", False)
         use_shm = self.config.model.get("use_shm", False)
         use_fused_kernels = self.config.model.get("use_fused_kernels", False)
-
+        print(f"WORKER ATTRS - actor?:{self._is_actor}, rollout?:{self._is_rollout}, ref?:{self._is_ref}, val_only?:{self.val_only}")
         if self._is_actor or self._is_rollout:
             # we need the model for actor and rollout
             if self._is_actor:
