@@ -160,7 +160,16 @@ class ExternalZeroMQDistributedExecutor(Executor):
             sent_method = pickle.dumps(method)
         del method
 
-        message = pickle.dumps((sent_method, args, kwargs or {}))
+        try:
+            message = pickle.dumps((sent_method, args, kwargs or {}))
+        except Exception as e:
+            try:
+                import cloudpickle
+                message = cloudpickle.dumps((sent_method, args, kwargs or {}))
+            except Exception as e_2:
+                print(f"Failed to pickle, using cloudpickle: {e_2}")
+                raise e_2
+
         for socket in self.sockets:
             socket.send(message, zmq.DONTWAIT)
 
@@ -260,11 +269,38 @@ class AsyncvLLMServer(AsyncServerBase):
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
             seed=config.get("seed", 0),
+            disable_log_requests=True,
         )
 
         # init async llm engine
         vllm_config = self._create_engine_config(engine_args)
         self.engine = AsyncLLM.from_vllm_config(vllm_config)
+
+        # # build serving chat
+        # # do a monkey patch again
+        # import vllm.plugins as vllm_plugins
+        # if vllm_plugins.plugins_loaded:
+        #     print("vllm_plugins loaded, no need to do monkey patch again")
+        # else:
+        #     print("vllm_plugins not loaded, do monkey patch again")
+        #     raise NotImplementedError("Not implemented")
+        #     # vllm_plugins.load_plugins_by_group()
+        
+
+        model_config = self.engine.model_config
+        BASE_MODEL_PATHS = [BaseModelPath(name=model_name, model_path=model_path)]
+        models = OpenAIServingModels(self.engine, model_config, BASE_MODEL_PATHS)
+        self.openai_serving_chat = OpenAIServingChat(
+            self.engine,
+            model_config,
+            models,
+            "assistant",
+            request_logger=RequestLogger(max_log_len=4096),
+            chat_template=None,
+            chat_template_content_format="auto",
+            enable_auto_tools=config.multi_turn.tool_config_path is not None,
+            tool_parser=config.multi_turn.format,  # hermes, llama3_json, ...
+        )
 
     def _create_engine_config(self, engine_args: AsyncEngineArgs):
         vllm_config = engine_args.create_engine_config()
@@ -280,6 +316,27 @@ class AsyncvLLMServer(AsyncServerBase):
 
         return vllm_config
 
+    async def chat_completion(self, raw_request: Request):
+        """OpenAI-compatible HTTP endpoint.
+
+        API reference: https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+        """
+        # from src.qwen_2_5_memory.vllm.vllm_qwen2_5_memory.chat_monkey_patch import monkey_patch_chat_parsing
+        # monkey_patch_chat_parsing()
+
+        request_json = await raw_request.json()
+        request = ChatCompletionRequest(**request_json)
+
+        generator = await self.openai_serving_chat.create_chat_completion(request, raw_request)
+
+        if isinstance(generator, ErrorResponse):
+            return JSONResponse(content=generator.model_dump(), status_code=generator.code)
+        if request.stream:
+            return StreamingResponse(content=generator, media_type="text/event-stream")
+        else:
+            assert isinstance(generator, ChatCompletionResponse)
+            return JSONResponse(content=generator.model_dump())
+
     async def generate(self, prompt_ids: list[int], sampling_params: dict[str, Any], request_id: str) -> list[int]:
         max_tokens = self.max_model_len - len(prompt_ids)
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
@@ -293,12 +350,6 @@ class AsyncvLLMServer(AsyncServerBase):
         assert final_res is not None
 
         return final_res.outputs[0].token_ids
-
-
-    async def chat(self, prompt_ids: list[int], request_id: str) -> list[int]:
-        pass
-
-
 
     async def wake_up(self):
         if self.config.rollout.free_cache_engine:

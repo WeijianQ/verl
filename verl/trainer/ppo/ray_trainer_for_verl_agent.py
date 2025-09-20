@@ -132,7 +132,10 @@ class ResourcePoolManager:
 
         # check total required gpus can be satisfied
         total_available_gpus = sum(node_available_gpus.values())
+        print(f"Total available GPUs: {total_available_gpus}")
+        print(f"resource_pool_spec: {self.resource_pool_spec}")
         total_required_gpus = sum([n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes])
+        print(f"Total required GPUs: {total_required_gpus}")
         if total_available_gpus < total_required_gpus:
             raise ValueError(f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}")
 

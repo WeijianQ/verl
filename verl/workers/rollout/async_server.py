@@ -162,6 +162,7 @@ class AsyncLLMServerManager:
                         soft=False,
                     ),
                     name=f"async_llm_server_{rollout_dp_rank}",
+                    runtime_env={"env_vars": {"VLLM_PLUGINS": "vllm_qwen2_5_memory"}},
                 ).remote(config, self.rollout_dp_size, rollout_dp_rank, self.worker_group.name_prefix)
                 for rollout_dp_rank in unready_dp_ranks
             }

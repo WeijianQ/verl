@@ -341,6 +341,7 @@ class ChatCompletionScheduler:
         completions, exception = None, None
         try:
             # NOTE: OpenAI client uses httpx, seems to have performance issue in high concurrency requests.
+            print(f"DEBUG: submitting chat completions to {address} with messages: {messages}")
             completions = await self._chat_completions_aiohttp(
                 address,
                 messages=messages,
