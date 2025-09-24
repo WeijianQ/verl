@@ -72,6 +72,8 @@ from verl.utils.ulysses import (
     ulysses_pad_and_slice_inputs,
 )
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
+from verl.utils.dataset.memory_sft_dataset import MemorySFTDataset
+from torch.nn.utils.rnn import pad_sequence
 
 if is_cuda_available:
     from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
@@ -171,6 +173,10 @@ class FSDPSFTTrainer:
         self.train_sampler = DistributedSampler(
             self.train_dataset, shuffle=True, num_replicas=world_size, rank=rank, drop_last=True
         )
+        if isinstance(self.train_dataset, MemorySFTDataset):
+            self._collate_fn = self._collate_fn_for_memory_sft
+        else:
+            self._collate_fn = None
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=config.data.train_batch_size,
@@ -178,11 +184,16 @@ class FSDPSFTTrainer:
             num_workers=8,
             pin_memory=True,
             drop_last=True,
+            collate_fn=self._collate_fn,
         )
 
         self.val_sampler = DistributedSampler(
             self.val_dataset, shuffle=False, num_replicas=world_size, rank=rank, drop_last=True
         )
+        if isinstance(self.val_dataset, MemorySFTDataset):
+            self._collate_fn = self._collate_fn_for_memory_sft
+        else:
+            self._collate_fn = None
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
             batch_size=config.data.micro_batch_size_per_gpu,
@@ -190,7 +201,86 @@ class FSDPSFTTrainer:
             num_workers=8,
             pin_memory=True,
             drop_last=True,
+            collate_fn=self._collate_fn,
         )
+
+    def _collate_fn_for_memory_sft(self, batch):
+        """
+        Custom collate function for MemorySFTDataset output.
+        Handles batching of memory-related data structures.
+        """
+        # the dataloader already pad the normal inputs
+        input_ids = torch.stack([item["input_ids"] for item in batch])
+        attention_mask = torch.stack([item["attention_mask"] for item in batch]) 
+        loss_mask = torch.stack([item["loss_mask"] for item in batch])
+        position_ids = torch.stack([item["position_ids"] for item in batch]) if "position_ids" in batch[0] else None
+
+        # 
+        memory_input_ids, memory_attention_mask, memory_indices = [], [], []
+        start_idx = 0
+        # flatten 
+        for item in batch:
+            memory_input_ids.extend(item["memory_input_ids"])
+            memory_attention_mask.extend(item["memory_attention_mask"])
+            memory_indice = item["memory_indices"] + start_idx
+            memory_indices.extend(memory_indice)
+            start_idx += len(memory_indice)
+
+        if memory_input_ids:
+            # 先处理truncation（如果需要）
+            truncated_input_ids = []
+            truncated_attention_mask = []
+            
+            for mem_ids, mem_mask in zip(memory_input_ids, memory_attention_mask):
+                if len(mem_ids) > self.config.data.max_length:
+                    truncated_input_ids.append(torch.tensor(mem_ids[:self.config.data.max_length]))
+                    truncated_attention_mask.append(torch.tensor(mem_mask[:self.config.data.max_length]))
+                else:
+                    truncated_input_ids.append(torch.tensor(mem_ids))
+                    truncated_attention_mask.append(torch.tensor(mem_mask))
+            
+            # 用pad_sequence处理padding
+            memory_input_ids = pad_sequence(
+                truncated_input_ids,
+                batch_first=True,
+                padding_value=self.tokenizer.pad_token_id,
+                padding_side="left",
+            )  # [total_memories, max_memory_len]
+            
+            memory_attention_mask = pad_sequence(
+                truncated_attention_mask, 
+                batch_first=True,
+                padding_value=0,
+                padding_side="left",
+            )  # [total_memories, max_memory_len]
+        else:
+            memory_input_ids = torch.empty((0, 0), dtype=torch.long)
+            memory_attention_mask = torch.empty((0, 0), dtype=torch.long)
+
+
+        memory_embedding_position = pad_sequence(
+            [item["memory_embedding_position"] for item in batch],
+            batch_first=True,
+            padding_value=-100
+        )  # [batch_size, max_positions]
+
+        memory_indices = pad_sequence(
+            [torch.tensor(item["memory_indices"]) for item in batch],
+            batch_first=True, 
+            padding_value=-100
+        )  # [batch_size, max_memories]
+
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "loss_mask": loss_mask,
+            "position_ids": position_ids,
+            "memory_input_ids": memory_input_ids,
+            "memory_attention_mask": memory_attention_mask,
+            "memory_embedding_position": memory_embedding_position,
+            "memory_indices": memory_indices,
+        }
 
     def _build_model_optimizer(self):
         # TODO (zhangchi.usc1992):
@@ -357,6 +447,16 @@ class FSDPSFTTrainer:
         loss_mask = batch.pop("loss_mask")[:, :-1].reshape(-1).to(self.device_name)
         loss_fct = nn.CrossEntropyLoss(reduction="none")
 
+        # Handle memory data if present (for MemorySFTDataset)
+        memory_kwargs = {}
+        if "memory_input_ids" in batch:
+            memory_kwargs.update({
+                "memory_input_ids": batch["memory_input_ids"].to(self.device_name),
+                "memory_attention_mask": batch["memory_attention_mask"].to(self.device_name),
+                "memory_embedding_position": batch["memory_embedding_position"].to(self.device_name),
+                "memory_indices": batch["memory_indices"].to(self.device_name),
+            })
+
         # Context manager for sequence parallel if needed
         context = self.sharding_manager if use_sp else nullcontext()
         with context, torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
@@ -364,7 +464,11 @@ class FSDPSFTTrainer:
                 # Standard forward pass without sequence parallel
                 labels = input_ids[:, 1:].contiguous()
                 output = self.fsdp_model(
-                    input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    use_cache=False,
+                    **memory_kwargs
                 )
                 logits = output.logits
 
@@ -413,6 +517,7 @@ class FSDPSFTTrainer:
                     attention_mask=None,  # Not needed with flash attention varlen
                     position_ids=position_ids_rmpad_padded,
                     use_cache=False,
+                    **memory_kwargs
                 )
 
                 # Compute loss locally then aggregate
