@@ -130,7 +130,6 @@ def main(config):
 
     # Build envs (train and val); we use val envs
     envs, val_envs = make_envs(config)
-    del val_envs
 
     # Build datasets and loaders like the trainer
     train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
@@ -147,6 +146,8 @@ def main(config):
     print(f"Train dataloader batches: {len(train_loader)}; batch_size={train_batch_size}")
     
     save_path = f"nl_traj_collect/{config.trainer.experiment_name}_all_trajs_{config.env.env_name}.jsonl"
+    save_path = hydra.utils.to_absolute_path(save_path)
+    print(f"Saving to {save_path}")
     if not os.path.exists(save_path):
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
     if config.env.env_name == "alfworld/AlfredTWEnv":
@@ -162,7 +163,7 @@ def main(config):
 
 
     all_trajs = []
-    for bi, batch_dict in tqdm(enumerate(train_loader), total=len(train_loader), desc="Validation"):
+    for bi, batch_dict in tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Saving to {save_path}"):
         # print(f"\n=== Eval batch {bi:03d} ===")
         # Construct a DataProto for the dataset batch (for metadata/raw_prompt)
         gen_batch = DataProto.from_single_dict(batch_dict)
@@ -170,17 +171,18 @@ def main(config):
         # Build model inputs (prompts) for the current observations
 
         try:
-            prompt_batch = traj_collector.multi_turn_loop(gen_batch=gen_batch, envs=envs, async_rollout_manager=async_rollout_manager)
+            prompt_batch = traj_collector.multi_turn_loop(gen_batch=gen_batch, envs=val_envs, async_rollout_manager=async_rollout_manager)
         except Exception as e:
             print(str(e))
             print(traceback.format_exc())
             continue
 
 
-        all_trajs.extend([t.to_json() for t in prompt_batch.trajs])
+        this_trajs = [t.to_json() for t in prompt_batch.trajs]
+        # all_trajs.extend(this_trajs)
 
         with open(save_path, "a") as f:
-            for traj in all_trajs:
+            for traj in this_trajs:
                 json_line = json.dumps(traj, ensure_ascii=False)
                 f.write(json_line + '\n')
 
