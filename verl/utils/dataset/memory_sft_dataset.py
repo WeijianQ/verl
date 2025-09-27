@@ -51,6 +51,7 @@ class MemorySFTDataset(Dataset):
         config = config or {}
         self.truncation = config.get("truncation", "error")
         self.max_length = config.get("max_length", 1024)
+        self.max_memory_length = config.get("max_memory_length", 512)
         # Get messages_key from the new multiturn config structure
         multiturn_config = config.get("multiturn", {})
         self.messages_key = multiturn_config.get("messages_key", "messages")
@@ -136,18 +137,6 @@ class MemorySFTDataset(Dataset):
         
         return messages_processed, all_memories
 
-    def _deduplicate_memories(self, all_memories: list[str]) -> list[str]:
-        unique_memories = {content: i_mem for i_mem, content in enumerate(set(all_memories))}
-        new_indices = [unique_memories[content] for content in all_memories]
-
-        try:
-            tokenized_memories = self.processor(memory=list(unique_memories.keys()))
-        except Exception as e:
-            print(f"Failed to apply processor to memories: {e}")
-            raise
-        
-        return tokenized_memories, new_indices
-
     def __getitem__(self, item):
         tokenizer = self.tokenizer
         messages, all_memories = self._make_message(item)
@@ -192,7 +181,7 @@ class MemorySFTDataset(Dataset):
 
         seq_len = input_ids.shape[0]
         if seq_len < self.max_length:
-            pad_id = tokenizer.pad_token_id or 0
+            pad_id = tokenizer.pad_token_id
             pad_n = self.max_length - seq_len
             input_ids = torch.cat([input_ids, torch.full((pad_n,), pad_id, dtype=input_ids.dtype)])
             attention_mask = torch.cat([attention_mask, torch.zeros(pad_n, dtype=attention_mask.dtype)])
@@ -211,28 +200,29 @@ class MemorySFTDataset(Dataset):
             else:
                 raise ValueError(f"Unknown truncation {self.truncation}")
 
-        #### process Memory
-        memory_embedding_position = torch.where(input_ids == self.memory_pad_token)[0]
-        assert len(all_memories) == len(memory_embedding_position), f"len(all_memories) {len(all_memories)} != len(memory_embedding_position) {len(memory_embedding_position)}"
-
-        if len(all_memories) > 0:
-            tokenized_memories, new_indices = self._deduplicate_memories(all_memories)
-        else:
-            tokenized_memories = {}
-            new_indices = []
-
         position_ids = torch.arange(len(input_ids), dtype=torch.long)
         position_ids = position_ids * attention_mask
 
-        return {
+        text_inputs = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "loss_mask": loss_mask,
             "position_ids": position_ids,
-            "memory_input_ids": tokenized_memories.get("memory_input_ids", []),
-            "memory_attention_mask": tokenized_memories.get("memory_attention_mask", []),
-            "memory_embedding_position": memory_embedding_position,
-            "memory_indices": new_indices,
+        }
+
+        memory_inputs = {
+            "memory_input_ids": torch.empty((0, 0)),
+            "memory_attention_mask": torch.empty((0, 0)),
+        }
+        if len(all_memories) > 0:
+            memory_inputs = self.processor(text="dummy text", memory=all_memories, return_tensors="pt")
+            memory_inputs = {
+                "memory_input_ids": memory_inputs["memory_input_ids"],
+                "memory_attention_mask": memory_inputs["memory_attention_mask"],
+            }
+        return {
+            **text_inputs,
+            **memory_inputs,
         }
 
 if __name__ == "__main__":
@@ -250,87 +240,36 @@ if __name__ == "__main__":
             },
         },
     )
-    # print(dataset[0])
 
-    max_length = 4096
-    def _collate_fn_for_memory_sft(batch):
-        """
-        Custom collate function for MemorySFTDataset output.
-        Handles batching of memory-related data structures.
-        """
-        # the dataloader already pad the normal inputs
-        tokenizer = processor.tokenizer
-        input_ids = torch.stack([item["input_ids"] for item in batch])
-        attention_mask = torch.stack([item["attention_mask"] for item in batch]) 
-        loss_mask = torch.stack([item["loss_mask"] for item in batch])
-        position_ids = torch.stack([item["position_ids"] for item in batch]) if "position_ids" in batch[0] else torch.empty((0, 0), dtype=torch.long)
+    def collate_fn(batch):
 
-        # 
-        memory_input_ids, memory_attention_mask, memory_indices = [], [], []
-        start_idx = 0
-        # flatten 
-        for item in batch:
-            memory_input_ids.extend(item["memory_input_ids"])
-            memory_attention_mask.extend(item["memory_attention_mask"])
-            memory_indice = [idx + start_idx for idx in item["memory_indices"]]
-            memory_indices.extend(memory_indice)
-            start_idx += len(memory_indice)
+        batched_input_ids = torch.stack([item["input_ids"] for item in batch])
+        batched_attention_mask = torch.stack([item["attention_mask"] for item in batch])
+        batched_loss_mask = torch.stack([item["loss_mask"] for item in batch])
+        batched_position_ids = torch.stack([item["position_ids"] for item in batch])
 
-        if memory_input_ids:
-            # 先处理truncation（如果需要）
-            truncated_input_ids = []
-            truncated_attention_mask = []
-            
-            for mem_ids, mem_mask in zip(memory_input_ids, memory_attention_mask):
-                if len(mem_ids) > max_length:
-                    truncated_input_ids.append(torch.tensor(mem_ids[-max_length:]))
-                    truncated_attention_mask.append(torch.tensor(mem_mask[-max_length:]))
-                else:
-                    truncated_input_ids.append(torch.tensor(mem_ids))
-                    truncated_attention_mask.append(torch.tensor(mem_mask))
-            
-            # 
-            memory_input_ids = pad_sequence(
-                truncated_input_ids,
-                batch_first=True,
-                padding_value=tokenizer.pad_token_id,
-                padding_side="left",
-            )  # [total_memories, max_memory_len]
-            
-            memory_attention_mask = pad_sequence(
-                truncated_attention_mask, 
-                batch_first=True,
-                padding_value=0,
-                padding_side="left",
-
-            )  # [total_memories, max_memory_len]
+        max_memory_num = max([item["memory_input_ids"].shape[0] for item in batch])
+        max_memory_len = max([item["memory_input_ids"].shape[1] for item in batch])
+        if max_memory_num == 0 and max_memory_len == 0:
+            batched_memory_input_ids = torch.empty((len(batch), 0, 0))
+            batched_memory_attention_mask = torch.empty((len(batch), 0, 0))
         else:
-            memory_input_ids = torch.empty((0, 0), dtype=torch.long)
-            memory_attention_mask = torch.empty((0, 0), dtype=torch.long)
-
-
-        memory_embedding_position = pad_sequence(
-            [item["memory_embedding_position"] for item in batch],
-            batch_first=True,
-            padding_value=-100
-        )  # [batch_size, max_positions]
-
-        memory_indices = pad_sequence(
-            [torch.tensor(item["memory_indices"]) for item in batch],
-            batch_first=True, 
-            padding_value=-100
-        )  # [batch_size, max_memories]
-
-
+            batched_memory_input_ids = torch.full((len(batch), max_memory_num, max_memory_len), processor.tokenizer.pad_token_id)
+            batched_memory_attention_mask = torch.zeros_like(batched_memory_input_ids)
+            for i_batch, item in enumerate(batch):
+                memory_num = item["memory_input_ids"].shape[0]
+                if memory_num > 0:
+                    memory_length = item["memory_input_ids"].shape[1]
+                    batched_memory_input_ids[i_batch, :memory_num, -memory_length:] = item["memory_input_ids"].unsqueeze(0)
+                    batched_memory_attention_mask[i_batch, :memory_num, -memory_length:] = item["memory_attention_mask"].unsqueeze(0)
+        
         return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "loss_mask": loss_mask,
-            "position_ids": position_ids,
-            "memory_input_ids": memory_input_ids,
-            "memory_attention_mask": memory_attention_mask,
-            "memory_embedding_position": memory_embedding_position,
-            "memory_indices": memory_indices,
+            "input_ids": batched_input_ids,
+            "attention_mask": batched_attention_mask,
+            "loss_mask": batched_loss_mask,
+            "position_ids": batched_position_ids,
+            "memory_input_ids": batched_memory_input_ids,
+            "memory_attention_mask": batched_memory_attention_mask,
         }
 
     from torch.utils.data import DistributedSampler
@@ -338,7 +277,7 @@ if __name__ == "__main__":
     world_size = 1
     rank = 0
     train_sampler = DistributedSampler(
-        dataset, shuffle=True, num_replicas=world_size, rank=rank, drop_last=True
+        dataset, shuffle=True, num_replicas=world_size, rank=rank, drop_last=True, seed=42,
     )
     dataloader = StatefulDataLoader(
         dataset=dataset,
@@ -347,14 +286,14 @@ if __name__ == "__main__":
         num_workers=1,
         pin_memory=True,
         drop_last=True,
-        collate_fn=_collate_fn_for_memory_sft,
+        collate_fn=collate_fn,
     )
-    model = AutoModelForCausalLM.from_pretrained("ckpt/Qwen2.5-1.5B-Memory", trust_remote_code=True).to("cuda")
     
-    for batch in dataloader:
-        print(batch)
+    for j, batch in enumerate(dataloader):
+        # print(batch)
         with torch.no_grad():
             batch = {k: v.to("cuda") for k, v in batch.items()}
             outputs = model(**batch)
             print(outputs.logits.shape)
+        if j > 10:
             break
