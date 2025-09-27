@@ -779,6 +779,8 @@ class RayPPOTrainer:
             del test_batch
             test_batch = test_output_gen_batch
             # Store generated outputs
+            from src.utils import wait_for_debugger
+            wait_for_debugger()
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
@@ -1113,13 +1115,18 @@ class RayPPOTrainer:
                         #     self.async_rollout_manager.sleep()
 
                         ################ agent-environment loop ###############
-                        gen_batch_output = self.traj_collector.multi_turn_loop(
-                            gen_batch=gen_batch,
-                            actor_rollout_wg=self.actor_rollout_wg,
-                            envs=self.envs,
-                            is_train=True,
-                            async_rollout_manager=(self.async_rollout_manager if getattr(self, "async_rollout_mode", False) else None),
-                        )
+                        if self.async_rollout_mode:
+                            self.async_rollout_manager.wake_up()
+                            gen_batch_output = self.traj_collector.multi_turn_loop(
+                                gen_batch=gen_batch,
+                                actor_rollout_wg=self.actor_rollout_wg,
+                                envs=self.envs,
+                                is_train=True,
+                                async_rollout_manager=(self.async_rollout_manager if getattr(self, "async_rollout_mode", False) else None),
+                            )
+                            self.async_rollout_manager.sleep()
+                        else:
+                            raise NotImplementedError("sync rollout not implemented yet")
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer("gen_max", timing_raw):
                             gen_baseline_batch = deepcopy(gen_batch)
