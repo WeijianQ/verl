@@ -274,7 +274,7 @@ class AsyncvLLMServer(AsyncServerBase):
 
         # init async llm engine
         vllm_config = self._create_engine_config(engine_args)
-        self.engine = AsyncLLM.from_vllm_config(vllm_config)
+        self.engine = AsyncLLM.from_vllm_config(vllm_config, disable_log_requests=True, disable_log_stats=True)
 
         # # build serving chat
         # # do a monkey patch again
