@@ -161,8 +161,8 @@ class TaskRunner:
 
         assert config.actor_rollout_ref.rollout.n == 1, "In verl, actor_rollout_ref.rollout.n>1 is for GRPO. In verl+env, we keep n=1, and achieve GRPO by env.rollout.n"
 
-        from src.verlagent.multi_turn_rollout import TrajectoryCollector
-        traj_collector = TrajectoryCollector(config=config, tokenizer=tokenizer, processor=processor)
+        from src.agent_loop.rollout_sync_env_collect_inst_data import TrajectoryCollectorUsingAsyncLLMServer
+        traj_collector = TrajectoryCollectorUsingAsyncLLMServer(config=config, tokenizer=tokenizer, processor=processor)
 
         from verl.utils.dataset.rl_dataset import collate_fn
 
