@@ -40,6 +40,7 @@ from verl.utils.import_utils import deprecated
 logger = logging.getLogger(__file__)
 
 
+
 class CompletionCallback(ABC):
     def __init__(self, config: DictConfig, scheduler: "ChatCompletionScheduler"):
         self.config = config
@@ -255,7 +256,11 @@ class ToolCompletionCallback(CompletionCallback):
         loss_mask = attention_mask.clone()
         for i in range(batch_size):
             responses = batch_conversations[i][len(raw_prompts[i]) :]
-            assert len(responses) > 0, f"responses is empty: {responses}"
+            try:
+                assert len(responses) > 0, f"responses is empty: {responses}"
+            except Exception as e:
+                from src.utils import wait_for_debugger
+                wait_for_debugger()
 
             roles = deduplicate_adjacent_tool_calls([response["role"] for response in responses])
             # Each turn should be: [BOS]...[EOS]
@@ -341,7 +346,7 @@ class ChatCompletionScheduler:
         completions, exception = None, None
         try:
             # NOTE: OpenAI client uses httpx, seems to have performance issue in high concurrency requests.
-            print(f"DEBUG: submitting chat completions to {address} with messages: {messages}")
+            # print(f"DEBUG: submitting chat completions to {address} with messages: {messages}")
             completions = await self._chat_completions_aiohttp(
                 address,
                 messages=messages,
