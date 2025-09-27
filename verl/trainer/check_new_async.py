@@ -137,17 +137,17 @@ def main(config):
     messages_with_memory0 = [
         {'role': 'system', 'content': "this is a system prompt"},
         {'role': 'user', 'content': [
-            {'type': 'image_url', 'image_url': {'url': "This is a dummy memory for round 1"}},
+            {'type': 'memory_text', 'memory_text': {'text': "This is a dummy memory for round 1"}},
             {'type': 'text', 'text': "dummy question for round 1"},
         ]},
         {'role': 'assistant', 'content': "dummy response"},
         {'role': 'user', 'content': [
-            {'type': 'image_url', 'image_url': {'url': "This is a dummy memory for round 1"}},
+            {'type': 'memory_text', 'memory_text': {'text': "This is a dummy memory for round 1"}},
             {'type': 'text', 'text': 'dummy question'},
         ]},
         {'role': 'assistant', 'content': "dummy response"},
         {'role': 'user', 'content': [
-            {'type': 'image_url', 'image_url': {'url': "This is a dummy memory for round 1"}},
+            {'type': 'memory_text', 'memory_text': {'text': "This is a dummy memory for round 1"}},
             {'type': 'text', 'text': 'What should I do next?'},
         ]},
     ]
