@@ -33,7 +33,7 @@ from tensordict import TensorDict
 
 from verl.protocol import DataProto
 from verl.tools.utils.tool_registry import initialize_tools_from_config
-from verl.utils import hf_tokenizer
+from verl.utils import hf_tokenizer, hf_processor
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import deprecated
 
@@ -56,6 +56,7 @@ class CompletionCallback(ABC):
 
         local_path = copy_to_local(config.actor_rollout_ref.model.path)
         self.tokenizer = hf_tokenizer(local_path, trust_remote_code=True)
+        self.processor = hf_processor(local_path, trust_remote_code=True)
 
     @property
     def tool_schemas(self):
@@ -175,6 +176,25 @@ class ToolCompletionCallback(CompletionCallback):
         ]
         assert len(batch_conversations) == len(prompts) * n
 
+        ### gather memory data
+        batch_memory_input_ids = []
+        batch_memory_attention_mask = []
+        for prompt in batch.non_tensor_batch["raw_prompt"]:
+            memory_text_list = []
+            for msg in prompt:
+                if isinstance(msg["content"], list):
+                    for cnt_item in msg["content"]:
+                        if cnt_item['type'] == "memory_text":
+                            memory_text_list.append(cnt_item['memory_text']['text'])
+            memory_inputs = {}
+            if len(memory_text_list) > 0:
+                memory_inputs = self.processor(text=None, memory=memory_text_list, return_tensors="pt")
+            batch_memory_input_ids.append(memory_inputs.get("memory_input_ids", torch.empty((0, 0))))
+            batch_memory_attention_mask.append(memory_inputs.get("memory_attention_mask", torch.empty((0, 0))))
+
+        batch_memory_input_ids = np.array(batch_memory_input_ids)
+        batch_memory_attention_mask = np.array(batch_memory_attention_mask)
+
         # sequences: [prompt + response]
         sequences = [
             self.tokenizer.apply_chat_template(
@@ -204,6 +224,11 @@ class ToolCompletionCallback(CompletionCallback):
         attention_mask = torch.cat([prompts["attention_mask"], responses["attention_mask"]], dim=1)
         position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
 
+        # repeat memory data if n > 1
+        if n > 1:
+            batch_memory_input_ids = np.array([mem_ids for mem_ids in batch_memory_input_ids for _ in range(n)])
+            batch_memory_attention_mask = np.array([mem_mask for mem_mask in batch_memory_attention_mask for _ in range(n)])
+
         batch = TensorDict(
             {
                 "prompts": prompts["input_ids"],  # [bsz, prompt_length]
@@ -217,7 +242,14 @@ class ToolCompletionCallback(CompletionCallback):
         )
 
         num_turns = np.array([len(conversation) for conversation in batch_conversations], dtype=np.int32)
-        return DataProto(batch=batch, non_tensor_batch={"__num_turns__": num_turns})
+        return DataProto(
+            batch=batch,
+            non_tensor_batch={
+                "__num_turns__": num_turns,
+                "memory_input_ids": batch_memory_input_ids,
+                "memory_attention_mask": batch_memory_attention_mask,
+            }
+        )
 
     def _mask_out_tools_calling_tokens(
         self,
