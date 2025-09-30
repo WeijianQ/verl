@@ -316,6 +316,9 @@ class RayPPOTrainer:
         collate_fn=None,
         train_sampler: Optional[Sampler] = None,
         device_name=None,
+        traj_collector=None,
+        envs=None,
+        val_envs=None,
     ):
         """
         Initialize distributed PPO trainer with Ray backend.
@@ -360,6 +363,11 @@ class RayPPOTrainer:
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
         )
+        self.traj_collector = traj_collector
+        self.envs = envs
+        self.val_envs = val_envs
+        if self.traj_collector is not None and self.config.actor_rollout_ref.rollout.mode != "async":
+            raise ValueError("Trajectory collector requires actor_rollout_ref.rollout.mode to be 'async'.")
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = config.actor_rollout_ref.model.get("lora_rank", 0) > 0
@@ -751,20 +759,20 @@ class RayPPOTrainer:
             }
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
-            # pad to be divisible by dp_size
-            size_divisor = (
-                self.actor_rollout_wg.world_size
-                if not self.async_rollout_mode
-                else self.config.actor_rollout_ref.rollout.agent.num_workers
-            )
-            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
-            if not self.async_rollout_mode:
-                test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
+            if self.traj_collector is not None:
+                test_output_gen_batch = self._run_rollout(test_gen_batch, is_train=False)
             else:
-                test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+                # pad to be divisible by dp_size
+                size_divisor = (
+                    self.actor_rollout_wg.world_size
+                    if not self.async_rollout_mode
+                    else self.config.actor_rollout_ref.rollout.agent.num_workers
+                )
+                test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
+                test_output_gen_batch_padded = self._run_rollout(test_gen_batch_padded, is_train=False)
 
-            # unpad
-            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
+                # unpad
+                test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
             print("validation generation end")
 
@@ -935,13 +943,22 @@ class RayPPOTrainer:
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
         if self.config.actor_rollout_ref.rollout.mode == "async":
-            from verl.experimental.agent_loop import AgentLoopManager
+            if self.traj_collector is not None:
+                from verl.workers.rollout.async_server import AsyncLLMServerManager as CollectorAsyncManager
 
-            self.async_rollout_mode = True
-            self.async_rollout_manager = AgentLoopManager(
-                config=self.config,
-                worker_group=self.actor_rollout_wg,
-            )
+                self.async_rollout_mode = True
+                self.async_rollout_manager = CollectorAsyncManager(
+                    config=self.config,
+                    worker_group=self.actor_rollout_wg,
+                )
+            else:
+                from verl.experimental.agent_loop import AgentLoopManager
+
+                self.async_rollout_mode = True
+                self.async_rollout_manager = AgentLoopManager(
+                    config=self.config,
+                    worker_group=self.actor_rollout_wg,
+                )
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
@@ -1097,6 +1114,30 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _run_rollout(self, gen_batch: DataProto, *, is_train: bool) -> DataProto:
+        """Dispatch rollout to either the standard generator or the memory trajectory collector."""
+
+        if self.traj_collector is not None:
+            if not self.async_rollout_mode or getattr(self, "async_rollout_manager", None) is None:
+                raise RuntimeError("Trajectory collector requires async rollout manager in async rollout mode.")
+
+            envs = self.envs if is_train else self.val_envs
+            if envs is None:
+                envs = self.envs
+            if envs is None:
+                raise ValueError("Trajectory collector requires training/validation environments to be provided.")
+
+            return self.traj_collector.multi_turn_loop(
+                gen_batch=gen_batch,
+                envs=envs,
+                async_rollout_manager=self.async_rollout_manager,
+                is_train=is_train,
+            )
+
+        if not self.async_rollout_mode:
+            return self.actor_rollout_wg.generate_sequences(gen_batch)
+        return self.async_rollout_manager.generate_sequences(gen_batch)
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1183,21 +1224,18 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
-                        if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        else:
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
+                        gen_batch_output = self._run_rollout(gen_batch, is_train=True)
+                        if isinstance(gen_batch_output.meta_info, dict) and "timing" in gen_batch_output.meta_info:
+                            timing_raw.update(gen_batch_output.meta_info["timing"])
+                            gen_batch_output.meta_info.pop("timing", None)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+                        if self.traj_collector is not None:
+                            raise NotImplementedError("REMAX estimator is not supported with trajectory collector.")
                         with marked_timer("gen_max", timing_raw, color="purple"):
                             gen_baseline_batch = deepcopy(gen_batch)
                             gen_baseline_batch.meta_info["do_sample"] = False
-                            if not self.async_rollout_mode:
-                                gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
-                            else:
-                                gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
+                            gen_baseline_output = self._run_rollout(gen_baseline_batch, is_train=True)
                             batch = batch.union(gen_baseline_output)
                             reward_baseline_tensor = self.reward_fn(batch)
                             reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)

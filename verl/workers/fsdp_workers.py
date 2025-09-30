@@ -696,6 +696,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 checkpoint_config=checkpoint_contents,
             )
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def scale_actor_weights(self, scale: float = 0.01) -> float:
+        """Scale actor FSDP weights by a constant factor for sanity checks."""
+        if not self._is_actor:
+            return float("nan")
+
+        if self.actor_module_fsdp is None:
+            raise RuntimeError("Actor module is not initialized; cannot scale weights.")
+
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        with torch.no_grad():
+            for param in self.actor_module_fsdp.parameters():
+                param.mul_(scale)
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+
+        return float(scale)
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: DataProto):
