@@ -21,7 +21,7 @@ VALID_CONFIG_TYPE = {
     "qwen2",
     "qwen2_vl",
     "qwen2_5_vl",
-    "qwen2_5_memory"
+    "qwen2_5_memory",
     "qwen3",
     "qwen3_moe",
     "deepseek_v3",
