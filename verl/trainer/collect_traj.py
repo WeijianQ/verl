@@ -122,7 +122,7 @@ def main(config):
     )
     print(f"Train dataloader batches: {len(train_loader)}; batch_size={train_batch_size}")
     
-    save_path = f"nl_traj_collect/{config.trainer.experiment_name}_all_trajs_{config.env.env_name}.jsonl"
+    save_path = f"nl_traj_collect/{config.trainer.experiment_name}_all_trajs_{config.env.env_name}.pkl"
     save_path = hydra.utils.to_absolute_path(save_path)
     traj_collector = TrajectoryCollectorUsingAsyncLLMServer(config=config, tokenizer=tokenizer, processor=processor)
 
@@ -144,14 +144,14 @@ def main(config):
             print(traceback.format_exc())
             continue
 
-
-        this_trajs = [t.to_json() for t in prompt_batch.trajs]
-        # all_trajs.extend(this_trajs)
-
-        with open(save_path, "a") as f:
-            for traj in this_trajs:
-                json_line = json.dumps(traj, ensure_ascii=False)
-                f.write(json_line + '\n')
+        all_trajs.append(prompt_batch)
+    # this_trajs = [t.to_json() for t in prompt_batch.trajs]
+    # all_trajs.extend(this_trajs)
+    import pickle
+    
+    with open(save_path, "a") as f:
+        for traj in all_trajs:
+            pickle.dump(traj, f)
 
     
 if __name__ == "__main__":
