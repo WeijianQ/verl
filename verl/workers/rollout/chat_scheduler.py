@@ -177,8 +177,8 @@ class ToolCompletionCallback(CompletionCallback):
         assert len(batch_conversations) == len(prompts) * n
 
         ### gather memory data
-        batch_memory_input_ids = []
-        batch_memory_attention_mask = []
+        batch_memory_input_ids_list = []
+        batch_memory_attention_mask_list = []
         for prompt in batch.non_tensor_batch["raw_prompt"]:
             memory_text_list = []
             for msg in prompt:
@@ -189,13 +189,26 @@ class ToolCompletionCallback(CompletionCallback):
             memory_inputs = {}
             if len(memory_text_list) > 0:
                 memory_inputs = self.processor(text=None, memory=memory_text_list, return_tensors="pt")
-            batch_memory_input_ids.append(memory_inputs.get("memory_input_ids", torch.empty((0, 0))))
-            batch_memory_attention_mask.append(memory_inputs.get("memory_attention_mask", torch.empty((0, 0))))
-
-        from src.utils import wait_for_debugger
-        wait_for_debugger()
-        batch_memory_input_ids = np.array(batch_memory_input_ids)
-        batch_memory_attention_mask = np.array(batch_memory_attention_mask)
+            batch_memory_input_ids_list.append(memory_inputs.get("memory_input_ids", torch.empty((0, 0))))
+            batch_memory_attention_mask_list.append(memory_inputs.get("memory_attention_mask", torch.empty((0, 0))))
+    
+        batch_size = len(batch_memory_input_ids_list)
+        max_memory_num = max([memory_input_ids.shape[0] for memory_input_ids in batch_memory_input_ids_list])
+        max_memory_len = max([memory_input_ids.shape[1] for memory_input_ids in batch_memory_input_ids_list])
+        if max_memory_num == 0 or max_memory_len == 0:
+            batch_memory_input_ids = torch.empty((batch_size, 0, 0))
+            batch_memory_attention_mask = torch.empty((batch_size, 0, 0))
+        else:
+            # from src.utils import wait_for_debugger
+            # wait_for_debugger()
+            batch_memory_input_ids = torch.full((batch_size, max_memory_num, max_memory_len), self.tokenizer.pad_token_id)
+            batch_memory_attention_mask = torch.zeros((batch_size, max_memory_num, max_memory_len))
+            for i_batch in range(batch_size):
+                memory_input_ids = batch_memory_input_ids_list[i_batch]
+                memory_attention_mask = batch_memory_attention_mask_list[i_batch]
+                if memory_input_ids.shape[0] > 0:
+                    batch_memory_input_ids[i_batch, :memory_input_ids.shape[0], -memory_input_ids.shape[1]:] = memory_input_ids
+                    batch_memory_attention_mask[i_batch, :memory_input_ids.shape[0], -memory_input_ids.shape[1]:] = memory_attention_mask
 
         # sequences: [prompt + response]
         sequences = [
@@ -228,8 +241,8 @@ class ToolCompletionCallback(CompletionCallback):
 
         # repeat memory data if n > 1
         if n > 1:
-            batch_memory_input_ids = np.array([mem_ids for mem_ids in batch_memory_input_ids for _ in range(n)])
-            batch_memory_attention_mask = np.array([mem_mask for mem_mask in batch_memory_attention_mask for _ in range(n)])
+            batch_memory_input_ids = batch_memory_input_ids.repeat_interleave(n, dim=0)
+            batch_memory_attention_mask = batch_memory_attention_mask.repeat_interleave(n, dim=0)
 
         batch = TensorDict(
             {
@@ -239,6 +252,8 @@ class ToolCompletionCallback(CompletionCallback):
                 "input_ids": input_ids,  # [bsz, prompt_length + response_length]
                 "attention_mask": attention_mask,  # [bsz, prompt_length + response_length]
                 "position_ids": position_ids,  # [bsz, prompt_length + response_length]
+                "memory_input_ids": batch_memory_input_ids, # [bsz, memory_num, memory_length]
+                "memory_attention_mask": batch_memory_attention_mask, # [bsz, memory_num, memory_length]
             },
             batch_size=len(input_ids),
         )
@@ -248,8 +263,6 @@ class ToolCompletionCallback(CompletionCallback):
             batch=batch,
             non_tensor_batch={
                 "__num_turns__": num_turns,
-                "memory_input_ids": batch_memory_input_ids,
-                "memory_attention_mask": batch_memory_attention_mask,
             }
         )
 
