@@ -170,17 +170,16 @@ def run_eval_memory(config: DictConfig) -> None:
                 is_train=False,
             )
 
-            reward_result = reward_fn(rollout_batch, return_dict=True)
-            reward_tensor = reward_result["reward_tensor"]
+            reward_tensor = reward_fn(rollout_batch, return_dict=True)
             batch_rewards = _gather_sequence_rewards(reward_tensor)
             all_rewards.extend(batch_rewards.tolist())
 
-            reward_extra = reward_result.get("reward_extra_info", {})
-            _merge_extra_info(extra_info, reward_extra)
+            # reward_extra = reward_result.get("reward_extra_info", {})
+            # _merge_extra_info(extra_info, reward_extra)
 
             progress.set_postfix(mean_reward=np.mean(all_rewards) if all_rewards else 0.0)
 
-    finally:
+    finally:w
         if progress is not None:
             progress.close()
         _print_summary(all_rewards, extra_info)
