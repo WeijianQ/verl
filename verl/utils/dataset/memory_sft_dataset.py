@@ -228,7 +228,7 @@ class MemorySFTDataset(Dataset):
 if __name__ == "__main__":
     from torch.nn.utils.rnn import pad_sequence
     from transformers import AutoModelForCausalLM
-    processor = hf_processor("ckpt/Qwen2.5-1.5B-Memory", trust_remote_code=True)
+    processor = hf_processor("WeijianQi1999/Qwen25-1p5B-Memory", trust_remote_code=True)
     dataset = MemorySFTDataset(
         parquet_files="nl_traj_sft_warmup/alfworld_traj_qwen25_1p5b_normal_messages.parquet",
         processor=processor,
@@ -288,7 +288,7 @@ if __name__ == "__main__":
         drop_last=True,
         collate_fn=collate_fn,
     )
-    
+    model = AutoModelForCausalLM.from_pretrained("WeijianQi1999/Qwen25-1p5B-Memory", trust_remote_code=True, device_map="auto")
     for j, batch in enumerate(dataloader):
         # print(batch)
         with torch.no_grad():
