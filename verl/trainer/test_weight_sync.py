@@ -18,13 +18,37 @@ from verl.utils.fs import copy_to_local
 
 
 def _build_test_batch(prompt: str) -> DataProto:
-    messages = np.array(
-        [
-            [
-                {"role": "system", "content": "You are a concise assistant."},
-                {"role": "user", "content": prompt},
+    messages = [
+        {
+            'role': 'system', 
+            'content': '\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\nYou are an expert agent operating in the ALFRED Embodied Environment.\nYour task is to: put a soapbottle in drawer\n\nYou should first reason step-by-step about the current situation. This reasoning process MUST be enclosed within <think> </think> tags.\nOnce you\'ve finished your reasoning, you should choose an admissible action for current step and present it within <action> </action> tags.\nOnce an episode ends, all past observations will be compressed into a numbered memory entry (e.g., "Memory 1", "Memory 2"). If you need to retrieve this past memory, you can recall it by number using the <recall> tag. For example: <recall>1</recall>. Then the observation will be restored.\n'
+        },
+        {
+            'role': 'user',
+            'content': [
+                {"type": "memory_text", "memory_text": {
+                    "text": "<observation>-= Welcome to TextWorld, ALFRED! =-\n\nYou are in the middle of a room. Looking quickly around you, you see a bathtubbasin 1, a countertop 2, a countertop 1, a drawer 8, a drawer 7, a drawer 6, a drawer 5, a drawer 4, a drawer 3, a drawer 2, a drawer 1, a garbagecan 1, a handtowelholder 4, a handtowelholder 3, a handtowelholder 2, a handtowelholder 1, a sinkbasin 2, a sinkbasin 1, a toilet 1, a toiletpaperhanger 1, and a towelholder 1.\n\nYour task is to: put a soapbottle in drawer.</observation> <admissible_actions>['go to bathtubbasin 1', 'go to countertop 1', 'go to countertop 2', 'go to drawer 1', 'go to drawer 2', 'go to drawer 3', 'go to drawer 4', 'go to drawer 5', 'go to drawer 6', 'go to drawer 7', 'go to drawer 8', 'go to garbagecan 1', 'go to handtowelholder 1', 'go to handtowelholder 2', 'go to handtowelholder 3', 'go to handtowelholder 4', 'go to sinkbasin 1', 'go to sinkbasin 2', 'go to toilet 1', 'go to toiletpaperhanger 1', 'go to towelholder 1', 'help', 'inventory', 'look']</admissible_actions>."
+                }}
             ]
-        ],
+        },
+        {
+            'role': 'assistant',
+            'content': '<think> \n1. First action: Go to the bathtubbasin 1\n2. Next action: Take a soapbottle from the bathtubbasin 1\n3. Action: Go to the inventory\n</think>\n\n<action>go to bathtubbasin 1</action>\n<action>take soapbottle from bathtubbasin 1</action>\n<action>inventory</action>\n'
+        },
+        {
+            'role': 'user',
+            'content': [{
+                'type': 'text',
+                'text': "<observation>-= Welcome to TextWorld, ALFRED! =-\n\nYou are in the middle of a room. Looking quickly around you, you see a bathtubbasin 1, a countertop 2, a countertop 1, a drawer 8, a drawer 7, a drawer 6, a drawer 5, a drawer 4, a drawer 3, a drawer 2, a drawer 1, a garbagecan 1, a handtowelholder 4, a handtowelholder 3, a handtowelholder 2, a handtowelholder 1, a sinkbasin 2, a sinkbasin 1, a toilet 1, a toiletpaperhanger 1, and a towelholder 1.\n\nYour task is to: put a soapbottle in drawer.</observation> <admissible_actions>['go to bathtubbasin 1', 'go to countertop 1', 'go to countertop 2', 'go to drawer 1', 'go to drawer 2', 'go to drawer 3', 'go to drawer 4', 'go to drawer 5', 'go to drawer 6', 'go to drawer 7', 'go to drawer 8', 'go to garbagecan 1', 'go to handtowelholder 1', 'go to handtowelholder 2', 'go to handtowelholder 3', 'go to handtowelholder 4', 'go to sinkbasin 1', 'go to sinkbasin 2', 'go to toilet 1', 'go to toiletpaperhanger 1', 'go to towelholder 1', 'help', 'inventory', 'look']</admissible_actions>."}
+                ]
+        },
+        {
+            'role': 'assistant',
+            'content': "<think> \n1. Failure to take soapbottle from the bathtubbasin 1. Let's try to take it from a countop first.\n</think>\n\n<action>go to countertop 1</action>\n<action>take soapbottle from countertop 1</action>\n<action>go to countertop 2</action>\n<action>take soapbottle from countertop 2</action>\n<action>check inventory</action>\n<action>look around the room</action>\n</action>\n"
+        }
+        ]
+    messages = np.array(
+        [messages],
         dtype=object,
     )
     return DataProto.from_single_dict({"raw_prompt": messages})

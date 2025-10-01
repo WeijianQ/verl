@@ -115,6 +115,19 @@ class DataParallelPPOActor(BasePPOActor):
                 )  # input_ids_rmpad (total_nnz, ...)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
+                if "memory_input_ids" in multi_modal_inputs.keys():
+                    # memory_input_ids = [batch_size, max_memory_num, max_memory_len]
+                    # memory_attention_mask = [batch_size, max_memory_num, max_memory_len]
+                    memory_input_ids = multi_modal_inputs["memory_input_ids"]
+                    memory_attention_mask = multi_modal_inputs["memory_attention_mask"]
+                    valid = memory_attention_mask.any(dim=-1)
+                    B, M, L = memory_input_ids.shape
+                    flat_input_ids = memory_input_ids.reshape(B*M, L)
+                    flat_attn_mask = memory_attention_mask.reshape(B*M, L)
+                    valid_flat = valid.reshape(-1)            # [B*M]
+                    multi_modal_inputs['memory_input_ids'] = flat_input_ids[valid_flat].unsqueeze(0)   # [1, valid_num, L]
+                    multi_modal_inputs['memory_attention_mask'] = flat_attn_mask[valid_flat].unsqueeze(0)   # [1, valid_num, L]
+
                 # unpad the position_ids to align the rotary
                 if position_ids.dim() == 3:
                     position_ids_rmpad = (
@@ -316,7 +329,7 @@ class DataParallelPPOActor(BasePPOActor):
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
-        select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "memory_input_ids", "memory_attention_mask"]
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
 
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)

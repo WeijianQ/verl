@@ -623,7 +623,7 @@ class RayPPOTrainer:
             batch_size=val_batch_size,
             num_workers=num_workers,
             shuffle=self.config.data.get("validation_shuffle", True),
-            drop_last=False,
+            drop_last=True,
             collate_fn=collate_fn,
         )
 
@@ -755,6 +755,8 @@ class RayPPOTrainer:
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump generations
+        from src.utils import wait_for_debugger
+        wait_for_debugger()
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
             self._dump_generations(
@@ -793,6 +795,10 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/min"] = sample_turns.min()
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
+
+        if len(success_rate_dict) > 0:
+            avg_success_rate = sum(success_rate_dict.values()) / len(success_rate_dict)
+            metric_dict["val-core/success_rate/mean"] = avg_success_rate
 
         return metric_dict
 
@@ -1213,8 +1219,8 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
                     # recompute old_log_probs
-                    from src.utils import wait_for_debugger
-                    wait_for_debugger()
+                    # from src.utils import wait_for_debugger
+                    # wait_for_debugger()
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
@@ -1312,6 +1318,9 @@ class RayPPOTrainer:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                            # pop meta info
+                            for pop_key in [ "traj_uids", "traj_won_values"]:
+                                batch.non_tensor_batch.pop(pop_key, None)
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
