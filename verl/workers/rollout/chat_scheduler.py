@@ -192,6 +192,8 @@ class ToolCompletionCallback(CompletionCallback):
             batch_memory_input_ids.append(memory_inputs.get("memory_input_ids", torch.empty((0, 0))))
             batch_memory_attention_mask.append(memory_inputs.get("memory_attention_mask", torch.empty((0, 0))))
 
+        from src.utils import wait_for_debugger
+        wait_for_debugger()
         batch_memory_input_ids = np.array(batch_memory_input_ids)
         batch_memory_attention_mask = np.array(batch_memory_attention_mask)
 
