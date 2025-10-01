@@ -1,7 +1,12 @@
 defaults:
   - actor@actor_rollout_ref.actor: dp_actor
+  - npu_profile@trainer.npu_profile: npu_profile
+  - data@data: legacy_data
   - ref@actor_rollout_ref.ref: dp_ref
   - rollout@actor_rollout_ref.rollout: rollout
+  - critic@critic: dp_critic
+  - reward_model@reward_model: dp_reward_model
+  - _self_
 
 data:
   tokenizer: null
@@ -14,6 +19,7 @@ data:
   max_response_length: 512
   train_batch_size: 1024
   val_batch_size: null
+  dataloader_num_workers: 8
   return_raw_input_ids: False  # This should be set to true when the tokenizer between policy and rm differs
   return_raw_chat: False
   return_full_prompt: False
@@ -32,6 +38,7 @@ actor_rollout_ref:
   hybrid_engine: True
   model:
     path: ~/models/deepseek-llm-7b-chat
+    custom_chat_template: null
     use_shm: False
     external_lib: null
     override_config: { }
@@ -41,8 +48,11 @@ actor_rollout_ref:
     lora_rank: 0  # Set to positive value to enable LoRA (e.g., 32)
     lora_alpha: 16  # LoRA scaling factor
     target_modules: all-linear  # all-linear or [q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]
+    exclude_modules: null
     use_liger: False
     use_fused_kernels: False
+    fused_kernel_options:
+      impl_backend: torch
     trust_remote_code: False
   actor:
     strategy: fsdp  # [fsdp, fsdp2], This is for backward-compatibility
@@ -152,6 +162,11 @@ actor_rollout_ref:
       max_turns: null  # null for no limit (default max_length // 3)
       tool_config_path: null  # null for no tool
       format: chatml  # chatml, more formats will be supported in the future
+  profiler:
+    _target_: verl.utils.profiler.ProfilerConfig
+    discrete: False
+    all_ranks: False
+    ranks: []
   val_only: False
 
 critic:
@@ -236,6 +251,7 @@ custom_reward_function:
   name: compute_score
 
 algorithm:
+  _target_: verl.trainer.config.AlgoConfig
   gamma: 1.0
   lam: 1.0
   adv_estimator: gae
@@ -243,12 +259,14 @@ algorithm:
   use_kl_in_reward: False
   kl_penalty: kl  # how to estimate kl divergence
   kl_ctrl:
+    _target_: verl.trainer.config.KLControlConfig
     type: fixed
     kl_coef: 0.001
     horizon: 10000
     target_kl: 0.1
   use_pf_ppo: False
   pf_ppo:
+    _target_: verl.trainer.config.PFPPOConfig
     reweight_method: pow  # ["pow", "max_min", "max_random"]
     weight_pow: 2.0
   gigpo:
@@ -262,6 +280,18 @@ trainer:
   balance_batch: True
   total_epochs: 30
   total_training_steps: null
+  profile_steps: null
+  controller_nsight_options:
+    trace: "cuda,nvtx,cublas,ucx"
+    cuda-memory-usage: "true"
+    cuda-graph-trace: "graph"
+  worker_nsight_options:
+    trace: "cuda,nvtx,cublas,ucx"
+    cuda-memory-usage: "true"
+    cuda-graph-trace: "graph"
+    capture-range: "cudaProfilerApi"
+    capture-range-end: null
+    kill: none
   project_name: verl_examples
   experiment_name: gsm8k
   logger: [ 'console', 'wandb' ]
@@ -271,10 +301,12 @@ trainer:
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
+  esi_redundant_time: 0
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_mode: auto # or disable or resume_path if resume_from_path is set
   resume_from_path: null
   val_before_train: True
+  val_only: False
   test_freq: -1
   critic_warmup: 0
   default_hdfs_dir: null
@@ -285,7 +317,7 @@ trainer:
   # The timeout for ray worker group to wait for the register center to be ready
   ray_wait_register_center_timeout: 300
   device: cuda
-  val_only: False
+  use_legacy_worker_impl: auto
 
 eval:
   max_batches: null
@@ -293,6 +325,7 @@ eval:
 
 ray_init:
   num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
+  timeline_json_file: null
 
 
 env:
