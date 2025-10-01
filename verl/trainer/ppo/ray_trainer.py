@@ -755,8 +755,7 @@ class RayPPOTrainer:
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump generations
-        from src.utils import wait_for_debugger
-        wait_for_debugger()
+       
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
             self._dump_generations(
@@ -766,29 +765,31 @@ class RayPPOTrainer:
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=val_data_dir,
             )
+        # from src.utils import wait_for_debugger
+        # wait_for_debugger()
+        # for key_info, lst in reward_extra_infos_dict.items():
+            # assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
 
-        for key_info, lst in reward_extra_infos_dict.items():
-            assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
+        # data_sources = np.concatenate(data_source_lst, axis=0)
 
-        data_sources = np.concatenate(data_source_lst, axis=0)
-
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
+        # data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
+        # metric_dict = {}
+        # for data_source, var2metric2val in data_src2var2metric2val.items():
+        #     core_var = "acc" if "acc" in var2metric2val else "reward"
+        #     for var_name, metric2val in var2metric2val.items():
+        #         n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
+        #         for metric_name, metric_val in metric2val.items():
+        #             if (
+        #                 (var_name == core_var)
+        #                 and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
+        #                 and (f"@{n_max}" in metric_name)
+        #             ):
+        #                 metric_sec = "val-core"
+        #             else:
+        #                 metric_sec = "val-aux"
+        #             pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
+        #             metric_dict[pfx] = metric_val
         metric_dict = {}
-        for data_source, var2metric2val in data_src2var2metric2val.items():
-            core_var = "acc" if "acc" in var2metric2val else "reward"
-            for var_name, metric2val in var2metric2val.items():
-                n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
-                for metric_name, metric_val in metric2val.items():
-                    if (
-                        (var_name == core_var)
-                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
-                        and (f"@{n_max}" in metric_name)
-                    ):
-                        metric_sec = "val-core"
-                    else:
-                        metric_sec = "val-aux"
-                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-                    metric_dict[pfx] = metric_val
 
         if len(sample_turns) > 0:
             sample_turns = np.concatenate(sample_turns)
@@ -796,6 +797,7 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
 
+        success_rate_dict = {t_uid: is_won for t_uid, is_won in zip(reward_extra_infos_dict.get("traj_uids", []), reward_extra_infos_dict.get("traj_won_values", []))}
         if len(success_rate_dict) > 0:
             avg_success_rate = sum(success_rate_dict.values()) / len(success_rate_dict)
             metric_dict["val-core/success_rate/mean"] = avg_success_rate
