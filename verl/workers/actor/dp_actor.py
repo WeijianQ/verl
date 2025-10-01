@@ -96,6 +96,9 @@ class DataParallelPPOActor(BasePPOActor):
                     multi_modal_inputs[key] = torch.cat(
                         [inputs[key] for inputs in micro_batch["multi_modal_inputs"]], dim=0
                     )
+        if "memory_input_ids" in micro_batch.keys():
+            multi_modal_inputs["memory_input_ids"] = micro_batch["memory_input_ids"]
+            multi_modal_inputs["memory_attention_mask"] = micro_batch["memory_attention_mask"]
 
         with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
             input_ids = micro_batch["input_ids"]
