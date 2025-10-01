@@ -21,9 +21,32 @@ import ray
 from omegaconf import OmegaConf
 
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
+from verl.trainer.main_ppo import create_rl_dataset
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, ResourcePoolManager, Role
 from verl.trainer.ppo.reward import load_reward_manager
+
+def create_rl_sampler(data_config, dataset):
+    """Create a sampler for the dataset.
+
+    Arguments:
+        data_config: The data config.
+        dataset (Dataset): The dataset.
+
+    Returns:
+        sampler (Sampler): The sampler.
+    """
+    import torch
+    from torch.utils.data import RandomSampler, SequentialSampler
+
+    # use sampler for better ckpt resume
+    if data_config.shuffle:
+        train_dataloader_generator = torch.Generator()
+        train_dataloader_generator.manual_seed(data_config.get("seed", 1))
+        sampler = RandomSampler(data_source=dataset, generator=train_dataloader_generator)
+    else:
+        sampler = SequentialSampler(data_source=dataset)
+
+    return sampler
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer_for_verl_agent", version_base=None)
@@ -35,7 +58,11 @@ def run_ppo_memory(config) -> None:
     """Launch PPO training using the memory trajectory collector."""
 
     if not ray.is_initialized():
-        ray.init(runtime_env=get_ppo_ray_runtime_env(), num_cpus=config.ray_init.num_cpus)
+        # ray.init(runtime_env=get_ppo_ray_runtime_env(), num_cpus=config.ray_init.num_cpus)
+        ray.init(
+            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true", "VLLM_USE_V1": os.getenv("VLLM_USE_V1", "1")}},
+            num_cpus=config.ray_init.num_cpus
+        )
 
     runner = TaskRunner.remote()
     ray.get(runner.run.remote(config))
@@ -120,7 +147,7 @@ class TaskRunner:
         reward_kwargs = config.reward_model.get("reward_kwargs", {})
         reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **reward_kwargs)
         val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **reward_kwargs)
-
+        print(f"TRAIN REWARD MANAGER: {reward_fn=}, VAL REWARD MANAGER: {val_reward_fn=}")
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         if config.actor_rollout_ref.rollout.n != 1:
