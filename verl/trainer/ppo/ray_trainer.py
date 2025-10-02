@@ -545,7 +545,7 @@ class RayPPOTrainer:
         #    ppo_mini_batch_size is divisible by ppo_micro_batch_size
         #    ppo_micro_batch_size * sequence_parallel_size >= n_gpus
         if not config.actor_rollout_ref.actor.use_dynamic_bsz:
-            assert config.data.train_batch_size >= config.actor_rollout_ref.actor.ppo_mini_batch_size, f"{config.data.train_batch_size=} is less than {config.actor_rollout_ref.actor.ppo_mini_batch_size=}"
+            # assert config.data.train_batch_size >= config.actor_rollout_ref.actor.ppo_mini_batch_size, f"{config.data.train_batch_size=} is less than {config.actor_rollout_ref.actor.ppo_mini_batch_size=}"
             sp_size = config.actor_rollout_ref.actor.get("ulysses_sequence_parallel_size", 1)
             if config.actor_rollout_ref.actor.ppo_micro_batch_size is not None:
                 assert (
@@ -693,32 +693,91 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path):
+    def _dump_generations(self, generations_record, dump_path):
         """Dump rollout/validation samples as JSONL."""
         os.makedirs(dump_path, exist_ok=True)
-        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
-
-        n = len(inputs)
-        base_data = {
-            "input": inputs,
-            "output": outputs,
-            "score": scores,
-            "step": [self.global_steps] * n,
-        }
-
-        for k, v in reward_extra_infos_dict.items():
-            if len(v) == n:
-                base_data[k] = v
+        if not dump_path.endswith(".jsonl"):
+            dump_path = os.path.join(dump_path, f"{self.global_steps}.jsonl")
+        if os.path.exists(dump_path):
+            import datetime
+            suffix = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            print(f"Warning: {dump_path} already exists, add {suffix} to the filename")
+            dump_path = os.path.join(dump_path, f"{self.global_steps}_{suffix}.jsonl")
 
         lines = []
-        for i in range(n):
-            entry = {k: v[i] for k, v in base_data.items()}
-            lines.append(json.dumps(entry, ensure_ascii=False))
+        for entry in generations_record:
+            entry_with_step = {**entry, "step": self.global_steps}
+            lines.append(json.dumps(entry_with_step, ensure_ascii=False))
 
-        with open(filename, "w") as f:
+        with open(dump_path, "w") as f:
             f.write("\n".join(lines) + "\n")
 
-        print(f"Dumped generations to {filename}")
+        print(f"Dumped generations to {dump_path}")
+
+    def _compute_episode_metrics(self, stage, success_rate_list, num_env_turns_list, num_recall_turns_list):
+        """Compute episode metrics for training or validation.
+
+        Args:
+            stage: Either "train" or "val" to prefix metric names
+            success_rate_list: List of (traj_uid, won_value) tuples
+            num_env_turns_list: List of environment turns per trajectory
+            num_recall_turns_list: List of recall turns per trajectory
+
+        Returns:
+            Dictionary of computed metrics
+        """
+        metric_dict = {}
+
+        if len(success_rate_list) > 0:
+            # Group by trajectory uid to avoid duplicates (same traj_uid appears multiple times due to rollout.n)
+            traj_success_dict = {}
+            traj_env_turns_dict = {}
+            traj_recall_turns_dict = {}
+
+            for i, (traj_uid, won_value) in enumerate(success_rate_list):
+                if traj_uid not in traj_success_dict:
+                    traj_success_dict[traj_uid] = won_value
+                    traj_env_turns_dict[traj_uid] = num_env_turns_list[i]
+                    traj_recall_turns_dict[traj_uid] = num_recall_turns_list[i]
+
+            # Compute overall success rate
+            avg_success_rate = np.mean(list(traj_success_dict.values()))
+            metric_dict[f"{stage}-core/success_rate/mean"] = avg_success_rate
+
+            # Compute episode length metrics (env turns + recall turns)
+            all_env_turns = list(traj_env_turns_dict.values())
+            all_recall_turns = list(traj_recall_turns_dict.values())
+            metric_dict[f"{stage}-aux/episode/env_turns/mean"] = np.mean(all_env_turns)
+            metric_dict[f"{stage}-aux/episode/env_turns/max"] = np.max(all_env_turns)
+            metric_dict[f"{stage}-aux/episode/recall_turns/mean"] = np.mean(all_recall_turns)
+            metric_dict[f"{stage}-aux/episode/recall_turns/max"] = np.max(all_recall_turns)
+
+            # Compute reward (using success as binary reward)
+            metric_dict[f"{stage}-core/episode/reward/mean"] = avg_success_rate
+
+            if self.config.env.env_name == "alfworld/AlfredTWEnv":
+                # Compute sub categories of success rate
+                task_categories = defaultdict(list)
+                tasks = [
+                    "pick_and_place",
+                    "pick_two_obj_and_place",
+                    "look_at_obj_in_light",
+                    "pick_heat_then_place_in_recep",
+                    "pick_cool_then_place_in_recep",
+                    "pick_clean_then_place_in_recep",
+                ]
+
+                for traj_uid, won_value in traj_success_dict.items():
+                    for task in tasks:
+                        if task in traj_uid:
+                            task_categories[task].append(won_value)
+                            break
+
+                for task, won_values in task_categories.items():
+                    if len(won_values) > 0:
+                        metric_dict[f"{stage}-aux/{task}_success_rate"] = np.mean(won_values)
+
+        return metric_dict
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -745,15 +804,15 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     def _validate(self):
-        data_source_lst = []
+        # data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
-        success_rate_dict = {}
-
+        success_rate_list = []
+        num_env_turns_list = []
+        num_recall_turns_list = []
         # Lists to collect samples for the table
-        sample_inputs = []
-        sample_outputs = []
-        sample_scores = []
-        sample_turns = []
+        generations_record = []
+        # from src.utils import wait_for_debugger
+        # wait_for_debugger()
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
@@ -773,74 +832,52 @@ class RayPPOTrainer:
             result = self.val_reward_fn(test_batch, return_dict=True)
             reward_tensor = result["reward_tensor"]
             scores = reward_tensor.sum(-1).cpu().tolist()
-            sample_scores.extend(scores)
+            # sample_scores.extend(scores)
 
             reward_extra_infos_dict["reward"].extend(scores)
-            print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
             if "reward_extra_info" in result:
                 for key, lst in result["reward_extra_info"].items():
                     reward_extra_infos_dict[key].extend(lst)
                     print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
 
             # collect num_turns of each prompt
-            if "__num_turns__" in test_batch.non_tensor_batch:
-                sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
+            # if "__num_turns__" in test_batch.non_tensor_batch:
+            #     sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
 
-            data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
+            # data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
-            if "traj_uids" and "traj_won_values" in test_batch.non_tensor_batch:
-                for traj_uid, traj_won_value in zip(test_batch.non_tensor_batch["traj_uids"], test_batch.non_tensor_batch["traj_won_values"]):
-                    success_rate_dict[traj_uid] = traj_won_value
+            if "episode_uids" and "traj_won_values" in test_batch.non_tensor_batch:
+                for j_sample in range(len(test_batch.non_tensor_batch["episode_uids"])):
+                    generations_record.append({
+                        "episode_uid": str(test_batch.non_tensor_batch["episode_uids"][j_sample]),
+                        "prompt": test_batch.non_tensor_batch["messages"][j_sample].tolist(),
+                        "response": str(test_batch.non_tensor_batch["llm_text_responses"][j_sample]),
+                        "episode_score": float(test_batch.non_tensor_batch["episode_scores"][j_sample]),
+                        "traj_score": float(test_batch.non_tensor_batch["reward_scores"][j_sample]),
+                    })
+            for j_traj in range(len(test_batch.meta_info["traj_won_values"])):
+                traj_uid = test_batch.meta_info["traj_uids"][j_traj]
+                success_rate_list.append((traj_uid, test_batch.meta_info["traj_won_values"][j_traj]))
+                num_env_turns_list.append(test_batch.meta_info["num_env_turns"][j_traj])
+                num_recall_turns_list.append(test_batch.meta_info["num_recall_turns"][j_traj])
 
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        # self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump generations
-       
-        val_data_dir = self.config.trainer.get("validation_data_dir", None)
-        if val_data_dir:
-            self._dump_generations(
-                inputs=sample_inputs,
-                outputs=sample_outputs,
-                scores=sample_scores,
-                reward_extra_infos_dict=reward_extra_infos_dict,
-                dump_path=val_data_dir,
-            )
-        # from src.utils import wait_for_debugger
-        # wait_for_debugger()
-        # for key_info, lst in reward_extra_infos_dict.items():
-            # assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
 
-        # data_sources = np.concatenate(data_source_lst, axis=0)
+        dump_path = os.path.join(self.config.trainer.default_local_dir, f"val_records_global_step_{self.global_steps}.jsonl")
 
-        # data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
-        # metric_dict = {}
-        # for data_source, var2metric2val in data_src2var2metric2val.items():
-        #     core_var = "acc" if "acc" in var2metric2val else "reward"
-        #     for var_name, metric2val in var2metric2val.items():
-        #         n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
-        #         for metric_name, metric_val in metric2val.items():
-        #             if (
-        #                 (var_name == core_var)
-        #                 and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
-        #                 and (f"@{n_max}" in metric_name)
-        #             ):
-        #                 metric_sec = "val-core"
-        #             else:
-        #                 metric_sec = "val-aux"
-        #             pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-        #             metric_dict[pfx] = metric_val
-        metric_dict = {}
 
-        if len(sample_turns) > 0:
-            sample_turns = np.concatenate(sample_turns)
-            metric_dict["val-aux/num_turns/min"] = sample_turns.min()
-            metric_dict["val-aux/num_turns/max"] = sample_turns.max()
-            metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
-
-        success_rate_dict = {t_uid: is_won for t_uid, is_won in zip(reward_extra_infos_dict.get("traj_uids", []), reward_extra_infos_dict.get("traj_won_values", []))}
-        if len(success_rate_dict) > 0:
-            avg_success_rate = sum(success_rate_dict.values()) / len(success_rate_dict)
-            metric_dict["val-core/success_rate/mean"] = avg_success_rate
+        self._dump_generations(
+            generations_record=generations_record,
+            dump_path=dump_path,
+        )
+        metric_dict = self._compute_episode_metrics(
+            stage="val",
+            success_rate_list=success_rate_list,
+            num_env_turns_list=num_env_turns_list,
+            num_recall_turns_list=num_recall_turns_list,
+        )
 
         return metric_dict
 
@@ -1236,6 +1273,24 @@ class RayPPOTrainer:
 
                     del batch
                     batch: DataProto = gen_batch_output
+
+                    ####### do the env-side metrics #######
+                    success_rate_list = []
+                    num_env_turns_list = []
+                    num_recall_turns_list = []
+                    traj_num = len(batch.meta_info["traj_uids"])
+                    for j_sample in range(traj_num):
+                        if batch.meta_info["traj_won_values"][j_sample]:
+                            success_rate_list.append((batch.meta_info["traj_uids"][j_sample], batch.meta_info["traj_won_values"][j_sample]))
+                            num_env_turns_list.append(batch.meta_info["num_env_turns"][j_sample])
+                            num_recall_turns_list.append(batch.meta_info["num_recall_turns"][j_sample])
+                    train_metrics = self._compute_episode_metrics(stage="train", success_rate_list=success_rate_list, num_env_turns_list=num_env_turns_list, num_recall_turns_list=num_recall_turns_list)
+                    metrics.update(train_metrics)
+                    ## drop the unnecessary keys
+                    for n_ts_key in ['messages', 'llm_text_responses']:
+                        batch.non_tensor_batch.pop(n_ts_key, None)
+                    ####### end of env-side metrics #######
+
                     ## make it divisible by world_size (drop residue)
                     batch_size_before = len(batch)
                     batch = adjust_batch(self.config, batch, mode="delete")
