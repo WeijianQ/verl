@@ -1284,8 +1284,7 @@ class RayPPOTrainer:
                             success_rate_list.append((batch.meta_info["traj_uids"][j_sample], batch.meta_info["traj_won_values"][j_sample]))
                             num_env_turns_list.append(batch.meta_info["num_env_turns"][j_sample])
                             num_recall_turns_list.append(batch.meta_info["num_recall_turns"][j_sample])
-                    train_metrics = self._compute_episode_metrics(stage="train", success_rate_list=success_rate_list, num_env_turns_list=num_env_turns_list, num_recall_turns_list=num_recall_turns_list)
-                    metrics.update(train_metrics)
+                    rollout_metrics = self._compute_episode_metrics(stage="train", success_rate_list=success_rate_list, num_env_turns_list=num_env_turns_list, num_recall_turns_list=num_recall_turns_list)
                     ## drop the unnecessary keys
                     for n_ts_key in ['messages', 'llm_text_responses']:
                         batch.non_tensor_batch.pop(n_ts_key, None)
@@ -1490,6 +1489,7 @@ class RayPPOTrainer:
                 self.max_steps_duration = max(self.max_steps_duration, steps_duration)
 
                 # training metrics
+                metrics.update(rollout_metrics)
                 metrics.update(
                     {
                         "training/global_step": self.global_steps,
