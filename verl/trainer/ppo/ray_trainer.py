@@ -714,7 +714,47 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {dump_path}")
 
-    def _compute_episode_metrics(self, stage, success_rate_list, num_env_turns_list, num_recall_turns_list):
+    def _extract_trajectory_stats(self, batch: DataProto):
+        """Extract trajectory statistics from batch meta_info.
+
+        Args:
+            batch: DataProto containing meta_info with trajectory statistics
+
+        Returns:
+            Tuple of (success_rate_list, num_env_turns_list, num_recall_turns_list, task_scores_list)
+            where success_rate_list contains (traj_uid, won_value) tuples
+        """
+        success_rate_list = []
+        num_env_turns_list = []
+        num_recall_turns_list = []
+        task_scores_list = []
+
+        traj_num = len(batch.meta_info.get("traj_uids", batch.meta_info.get("info_uid", [])))
+        for j_sample in range(traj_num):
+            # Extract trajectory UID
+            if "traj_uids" in batch.meta_info:
+                traj_uid = batch.meta_info["traj_uids"][j_sample]
+            else:
+                traj_uid = batch.meta_info["info_uid"][j_sample]
+
+            # Extract won value and other stats
+            won_value = batch.meta_info["traj_won_values"][j_sample]
+
+            # Only add to lists if the trajectory was successful (for backward compatibility)
+            # or add all trajectories depending on use case
+            success_rate_list.append((traj_uid, won_value))
+            num_env_turns_list.append(batch.meta_info["num_env_turns"][j_sample])
+            num_recall_turns_list.append(batch.meta_info["num_recall_turns"][j_sample])
+
+            # Extract task_score if available (for webshop)
+            if "task_scores" in batch.meta_info:
+                task_scores_list.append(batch.meta_info["task_scores"][j_sample])
+            else:
+                task_scores_list.append(0.0)
+
+        return success_rate_list, num_env_turns_list, num_recall_turns_list, task_scores_list
+
+    def _compute_episode_metrics(self, stage, success_rate_list, num_env_turns_list, num_recall_turns_list, task_scores_list):
         """Compute episode metrics for training or validation.
 
         Args:
@@ -777,6 +817,10 @@ class RayPPOTrainer:
                     if len(won_values) > 0:
                         metric_dict[f"{stage}-aux/{task}_success_rate"] = np.mean(won_values)
 
+            elif self.config.env.env_name == "Webshop":
+                # we log avg task score
+                metric_dict[f"{stage}-core/task_score/mean"] = np.mean(task_scores_list)
+
         return metric_dict
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
@@ -809,6 +853,7 @@ class RayPPOTrainer:
         success_rate_list = []
         num_env_turns_list = []
         num_recall_turns_list = []
+        task_scores_list = []
         # Lists to collect samples for the table
         generations_record = []
         # from src.utils import wait_for_debugger
@@ -855,11 +900,12 @@ class RayPPOTrainer:
                         "episode_score": float(test_batch.non_tensor_batch["episode_scores"][j_sample]),
                         "traj_score": float(test_batch.non_tensor_batch["reward_scores"][j_sample]),
                     })
-            for j_traj in range(len(test_batch.meta_info["traj_won_values"])):
-                traj_uid = test_batch.meta_info["traj_uids"][j_traj]
-                success_rate_list.append((traj_uid, test_batch.meta_info["traj_won_values"][j_traj]))
-                num_env_turns_list.append(test_batch.meta_info["num_env_turns"][j_traj])
-                num_recall_turns_list.append(test_batch.meta_info["num_recall_turns"][j_traj])
+            # Extract trajectory statistics
+            batch_success_list, batch_env_turns, batch_recall_turns, batch_task_scores = self._extract_trajectory_stats(test_batch)
+            success_rate_list.extend(batch_success_list)
+            num_env_turns_list.extend(batch_env_turns)
+            num_recall_turns_list.extend(batch_recall_turns)
+            task_scores_list.extend(batch_task_scores)
 
         # self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
@@ -877,6 +923,7 @@ class RayPPOTrainer:
             success_rate_list=success_rate_list,
             num_env_turns_list=num_env_turns_list,
             num_recall_turns_list=num_recall_turns_list,
+            task_scores_list=task_scores_list,
         )
 
         return metric_dict
@@ -1275,16 +1322,8 @@ class RayPPOTrainer:
                     batch: DataProto = gen_batch_output
 
                     ####### do the env-side metrics #######
-                    success_rate_list = []
-                    num_env_turns_list = []
-                    num_recall_turns_list = []
-                    traj_num = len(batch.meta_info["traj_uids"])
-                    for j_sample in range(traj_num):
-                        if batch.meta_info["traj_won_values"][j_sample]:
-                            success_rate_list.append((batch.meta_info["traj_uids"][j_sample], batch.meta_info["traj_won_values"][j_sample]))
-                            num_env_turns_list.append(batch.meta_info["num_env_turns"][j_sample])
-                            num_recall_turns_list.append(batch.meta_info["num_recall_turns"][j_sample])
-                    rollout_metrics = self._compute_episode_metrics(stage="train", success_rate_list=success_rate_list, num_env_turns_list=num_env_turns_list, num_recall_turns_list=num_recall_turns_list)
+                    success_rate_list, num_env_turns_list, num_recall_turns_list, task_scores_list = self._extract_trajectory_stats(batch)
+                    rollout_metrics = self._compute_episode_metrics(stage="train", success_rate_list=success_rate_list, num_env_turns_list=num_env_turns_list, num_recall_turns_list=num_recall_turns_list, task_scores_list=task_scores_list)
                     ## drop the unnecessary keys
                     for n_ts_key in ['messages', 'llm_text_responses']:
                         batch.non_tensor_batch.pop(n_ts_key, None)
