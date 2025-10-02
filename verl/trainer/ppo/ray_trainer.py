@@ -751,7 +751,17 @@ class RayPPOTrainer:
                 task_scores_list.append(batch.meta_info["task_scores"][j_sample])
             else:
                 task_scores_list.append(0.0)
-
+        assert len(success_rate_list) == len(num_env_turns_list) == len(num_recall_turns_list) == len(task_scores_list), f"len(success_rate_list): {len(success_rate_list)}, len(num_env_turns_list): {len(num_env_turns_list)}, len(num_recall_turns_list): {len(num_recall_turns_list)}, len(task_scores_list): {len(task_scores_list)}"
+        valid_indices = []
+        for i in range(len(success_rate_list)):
+            if success_rate_list[i][1] is not None and num_env_turns_list[i] is not None and num_recall_turns_list[i] is not None and task_scores_list[i] is not None:
+                valid_indices.append(i)
+            else:
+                print(f"Warning. One of these values is None for {success_rate_list[i][0]}: success_rate: {success_rate_list[i][1]}, num_env_turns: {num_env_turns_list[i]}, num_recall_turns: {num_recall_turns_list[i]}, task_scores: {task_scores_list[i]}")
+        success_rate_list = [success_rate_list[i] for i in valid_indices]
+        num_env_turns_list = [num_env_turns_list[i] for i in valid_indices]
+        num_recall_turns_list = [num_recall_turns_list[i] for i in valid_indices]
+        task_scores_list = [task_scores_list[i] for i in valid_indices]
         return success_rate_list, num_env_turns_list, num_recall_turns_list, task_scores_list
 
     def _compute_episode_metrics(self, stage, success_rate_list, num_env_turns_list, num_recall_turns_list, task_scores_list):
@@ -776,6 +786,9 @@ class RayPPOTrainer:
 
             for i, (traj_uid, won_value) in enumerate(success_rate_list):
                 if traj_uid not in traj_success_dict:
+                    if won_value is None:
+                        print(f"Warning: won_value is None for {traj_uid}")
+                        continue
                     traj_success_dict[traj_uid] = won_value
                     traj_env_turns_dict[traj_uid] = num_env_turns_list[i]
                     traj_recall_turns_dict[traj_uid] = num_recall_turns_list[i]
@@ -918,7 +931,8 @@ class RayPPOTrainer:
             generations_record=generations_record,
             dump_path=dump_path,
         )
-        metric_dict = self._compute_episode_metrics(
+        
+        metric_dict = self.compute_episode_metrics(
             stage="val",
             success_rate_list=success_rate_list,
             num_env_turns_list=num_env_turns_list,
@@ -1323,7 +1337,7 @@ class RayPPOTrainer:
 
                     ####### do the env-side metrics #######
                     success_rate_list, num_env_turns_list, num_recall_turns_list, task_scores_list = self._extract_trajectory_stats(batch)
-                    rollout_metrics = self._compute_episode_metrics(stage="train", success_rate_list=success_rate_list, num_env_turns_list=num_env_turns_list, num_recall_turns_list=num_recall_turns_list, task_scores_list=task_scores_list)
+                    rollout_metrics = self.compute_episode_metrics(stage="train", success_rate_list=success_rate_list, num_env_turns_list=num_env_turns_list, num_recall_turns_list=num_recall_turns_list, task_scores_list=task_scores_list)
                     ## drop the unnecessary keys
                     for n_ts_key in ['messages', 'llm_text_responses']:
                         batch.non_tensor_batch.pop(n_ts_key, None)
