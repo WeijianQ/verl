@@ -764,7 +764,7 @@ class RayPPOTrainer:
         task_scores_list = [task_scores_list[i] for i in valid_indices]
         return success_rate_list, num_env_turns_list, num_recall_turns_list, task_scores_list
 
-    def _compute_episode_metrics(self, stage, success_rate_list, num_env_turns_list, num_recall_turns_list, task_scores_list):
+    def compute_episode_metrics(self, stage, success_rate_list, num_env_turns_list, num_recall_turns_list, task_scores_list):
         """Compute episode metrics for training or validation.
 
         Args:
@@ -869,8 +869,6 @@ class RayPPOTrainer:
         task_scores_list = []
         # Lists to collect samples for the table
         generations_record = []
-        # from src.utils import wait_for_debugger
-        # wait_for_debugger()
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
@@ -904,14 +902,13 @@ class RayPPOTrainer:
 
             # data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
-            if "episode_uids" and "traj_won_values" in test_batch.non_tensor_batch:
+            if "episode_uids" in test_batch.non_tensor_batch:
                 for j_sample in range(len(test_batch.non_tensor_batch["episode_uids"])):
                     generations_record.append({
                         "episode_uid": str(test_batch.non_tensor_batch["episode_uids"][j_sample]),
                         "prompt": test_batch.non_tensor_batch["messages"][j_sample].tolist(),
                         "response": str(test_batch.non_tensor_batch["llm_text_responses"][j_sample]),
-                        "episode_score": float(test_batch.non_tensor_batch["episode_scores"][j_sample]),
-                        "traj_score": float(test_batch.non_tensor_batch["reward_scores"][j_sample]),
+                        "reward_score": float(test_batch.non_tensor_batch["reward_scores"][j_sample]),
                     })
             # Extract trajectory statistics
             batch_success_list, batch_env_turns, batch_recall_turns, batch_task_scores = self._extract_trajectory_stats(test_batch)
