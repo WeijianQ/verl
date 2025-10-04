@@ -76,8 +76,13 @@ def run_ppo_memory(config) -> None:
 class TaskRunner:
     def run(self, config):
         from pprint import pprint
+        if config.trainer.no_memory:
+            from src.agent_loop.sync_env_async_llm_batch_collector_no_mem import TrajectoryCollectorUsingAsyncLLMServer
+            traj_collector_cls = TrajectoryCollectorUsingAsyncLLMServer
+        else:
+            from src.agent_loop.sync_env_async_llm_batch_collector import TrajectoryCollectorUsingAsyncLLMServer
+            traj_collector_cls = TrajectoryCollectorUsingAsyncLLMServer
 
-        from src.agent_loop.sync_env_async_llm_batch_collector import TrajectoryCollectorUsingAsyncLLMServer
         from src.verlagent.environments import make_envs
         from verl.utils import hf_processor, hf_tokenizer
         from verl.utils.fs import copy_to_local
@@ -152,8 +157,9 @@ class TaskRunner:
 
         if config.actor_rollout_ref.rollout.n != 1:
             raise ValueError("In async memory training, actor_rollout_ref.rollout.n must remain 1.")
-
-        traj_collector = TrajectoryCollectorUsingAsyncLLMServer(
+        
+        print(f"Using traj_collector_cls: {traj_collector_cls}")
+        traj_collector = traj_collector_cls(
             config=config,
             tokenizer=tokenizer,
             processor=processor,
